@@ -106,19 +106,6 @@ def train_epoch(model, train_loader, optimizer, scheduler, scaler, device, epoch
             if global_step < config.muon_momentum_warmup:
                 frac = min(global_step / config.muon_momentum_warmup, 1.0)
             
-            # Update window sizes every 10000 steps
-            if global_step > 0 and global_step % 10000 == 0:
-                # Calculate new window size (grow by 128 each time)
-                steps_per_increase = 10000
-                increases = global_step // steps_per_increase
-                new_window_size = 128 + (increases * 128)
-                new_window_size = min(new_window_size, config.max_seq_len)
-                
-                # Update model window sizes
-                model.module.update_window_sizes(new_window_size)
-                
-                if rank == 0:
-                    print(f"\nStep {global_step}: Updated global attention window size to {new_window_size}")
             
             # Reset accumulated loss
             accumulated_loss = 0
@@ -179,6 +166,8 @@ def main():
     parser.add_argument('--n-kv-heads', type=int, default=None, help='Number of KV heads for GQA (defaults to n_heads)')
     parser.add_argument('--d-ff', type=int, default=1536, help='Feed-forward dimension')
     parser.add_argument('--max-seq-len', type=int, default=2048, help='Maximum sequence length')
+    parser.add_argument('--n-parallel-blocks', type=int, default=1, help='Number of parallel blocks per layer (wide architecture)')
+    parser.add_argument('--gradient-checkpointing', action='store_true', help='Use gradient checkpointing to save memory')
     
     # Training arguments
     parser.add_argument('--data-dir', type=str, required=True, help='Directory with tokenized data')
@@ -244,13 +233,17 @@ def main():
         n_kv_heads=args.n_kv_heads,
         d_ff=args.d_ff,
         max_seq_len=args.max_seq_len,
-        pad_token_id=0
+        pad_token_id=0,
+        n_parallel_blocks=args.n_parallel_blocks,
+        use_gradient_checkpointing=args.gradient_checkpointing
     ).to(device)
     
     # Print model param count (only on rank 0)
     if rank == 0:
         print(f"Model parameters: {model.num_parameters():,}")
         print(f"Using DDP with {world_size} GPUs")
+        if args.gradient_checkpointing:
+            print("Gradient checkpointing enabled - trading compute for memory")
     
     # Wrap model with DDP
     model = DDP(model, device_ids=[local_rank], output_device=local_rank)
