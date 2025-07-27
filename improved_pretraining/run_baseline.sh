@@ -2,31 +2,62 @@
 # Script to run baseline pretraining with DistributedDataParallel
 
 # Set your paths here
-DATA_DIR="/home/preston/git/tiny-bot/tokenized_gutenberg_8k_clean"
-OUTPUT_DIR="./checkpoints_ddp"
+# DATA_DIR will be automatically set based on VOCAB_SIZE
+OUTPUT_DIR="./checkpoints"
 
-# # Model configuration tiny
-# VOCAB_SIZE=8192
-# D_MODEL=384
-# N_LAYERS=12
-# N_HEADS=6
-# N_KV_HEADS=6
-# D_FF=768
-# WANDB_PROJECT="tiny-bot-baseline"
+# # Model configuration tinier
+# VOCAB_SIZE=1024
+# D_MODEL=264
+# N_LAYERS=1
+# N_HEADS=4
+# N_KV_HEADS=4
+# D_TOKEN=32
+# D_FF=512
+# LOG_INTERVAL=10
+# NUM_RECURRENCES=8  # Number of times to recycle layers (1 = no recycling)
+# USE_CHECKPOINT=false  # Use gradient checkpointing to save memory (true/false)
+# WANDB_PROJECT="tlm-quark"
 
 # Model configuration tinier
 VOCAB_SIZE=8192
-D_MODEL=192
-N_LAYERS=9
-N_HEADS=3
-N_KV_HEADS=3
-D_FF=384
-WANDB_PROJECT="tiny-bot-baseline-tinier-2"
+D_MODEL=400
+N_LAYERS=1
+N_HEADS=8
+N_KV_HEADS=8
+D_TOKEN=16
+D_FF=768
+LOG_INTERVAL=10
+NUM_RECURRENCES=8  # Number of times to recycle layers (1 = no recycling)
+USE_CHECKPOINT=true  # Use gradient checkpointing to save memory (true/false)
+WANDB_PROJECT="tlm-atom"
+
+# Set paths based on vocab size
+TOKENIZER_PATH="../gutenberg_tokenizer_${VOCAB_SIZE}"  # Automatically uses vocab size
+# Map vocab size to data directory suffix (1024->1k, 8192->8k, 65536->65k)
+if [ $VOCAB_SIZE -eq 1024 ]; then
+    DATA_SUFFIX="1k"
+elif [ $VOCAB_SIZE -eq 2048 ]; then
+    DATA_SUFFIX="2k"
+elif [ $VOCAB_SIZE -eq 4096 ]; then
+    DATA_SUFFIX="4k"
+elif [ $VOCAB_SIZE -eq 8192 ]; then
+    DATA_SUFFIX="8k"
+elif [ $VOCAB_SIZE -eq 16384 ]; then
+    DATA_SUFFIX="16k"
+elif [ $VOCAB_SIZE -eq 32768 ]; then
+    DATA_SUFFIX="32k"
+elif [ $VOCAB_SIZE -eq 65536 ]; then
+    DATA_SUFFIX="65k"
+else
+    echo "Warning: Unknown vocab size $VOCAB_SIZE, please set DATA_DIR manually"
+    exit 1
+fi
+DATA_DIR="../tokenized_gutenberg_${DATA_SUFFIX}_clean"
 
 # Training configuration
 # did 16 and 16 for last most successful run
 BATCH_SIZE=16   # Per GPU batch size (total will be 16 * num_gpus)
-GRADIENT_ACCUMULATION=1  # Effective batch size = 16 * num_gpus * 1
+GRADIENT_ACCUMULATION=16  # Effective batch size = 16 * num_gpus * 1
 
 # Conservative learning rates for stable, high-quality training
 LR=5e-4             # Conservative base LR for scalars/norms
@@ -66,6 +97,7 @@ torchrun \
     --n-layers $N_LAYERS \
     --n-heads $N_HEADS \
     --n-kv-heads $N_KV_HEADS \
+    --d-token $D_TOKEN \
     --d-ff $D_FF \
     --max-seq-len $MAX_SEQ_LEN \
     --batch-size $BATCH_SIZE \
@@ -75,10 +107,13 @@ torchrun \
     --head-lr $HEAD_LR \
     --warmup-steps $WARMUP_STEPS \
     --epochs $EPOCHS \
-    --log-interval 10 \
+    --log-interval $LOG_INTERVAL \
     --eval-interval 1000 \
     --save-interval 10000 \
     --muon-lr-scale $MUON_LR_SCALE \
     --muon-momentum $MUON_MOMENTUM \
     --muon-momentum-warmup $MUON_WARMUP \
-    --muon-ns-steps $MUON_NS_STEPS
+    --muon-ns-steps $MUON_NS_STEPS \
+    --num-recurrences $NUM_RECURRENCES \
+    --tokenizer-path $TOKENIZER_PATH \
+    $([ "$USE_CHECKPOINT" = "true" ] && echo "--use-checkpoint")

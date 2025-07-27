@@ -6,10 +6,8 @@ import argparse
 from pathlib import Path
 import sys
 
-# Add parent directory to path
+from model import TinyTransformer
 sys.path.append(str(Path(__file__).parent.parent))
-
-from baseline_pretraining.model import TinyTransformer
 from tokenizer import load_tokenizer
 
 
@@ -36,6 +34,9 @@ def sample_from_model(
     # Extract config (handle both old and new checkpoint formats)
     if 'config' in checkpoint:
         config = checkpoint['config']
+        # Handle wandb-wrapped config
+        if isinstance(config, dict) and '_items' in config:
+            config = config['_items']
     else:
         # Default config if not in checkpoint
         config = {
@@ -43,10 +44,23 @@ def sample_from_model(
             'd_model': 192,
             'n_layers': 9,
             'n_heads': 3,
+            'n_kv_heads': 3,
+            'd_token': 32,
             'd_ff': 384,
             'max_seq_len': 1024,
-            'dropout': 0.1
+            'num_recurrences': 8,
         }
+    
+    # Print config for debugging
+    print(f"\nModel configuration:")
+    print(f"  vocab_size: {config.get('vocab_size', 8192)}")
+    print(f"  d_model: {config.get('d_model', 192)}")
+    print(f"  n_layers: {config.get('n_layers', 9)}")
+    print(f"  n_heads: {config.get('n_heads', 3)}")
+    print(f"  n_kv_heads: {config.get('n_kv_heads', 3)}")
+    print(f"  d_token: {config.get('d_token', 32)}")
+    print(f"  d_ff: {config.get('d_ff', 384)}")
+    print(f"  num_recurrences: {config.get('num_recurrences', 1)}")
     
     # Create model
     model = TinyTransformer(
@@ -54,9 +68,13 @@ def sample_from_model(
         d_model=config.get('d_model', 192),
         n_layers=config.get('n_layers', 9),
         n_heads=config.get('n_heads', 3),
+        n_kv_heads=config.get('n_kv_heads', 3),
+        d_token=config.get('d_token', 32),
         d_ff=config.get('d_ff', 384),
         max_seq_len=config.get('max_seq_len', 1024),
-        dropout=0.0  # No dropout during inference
+        num_recurrences=config.get('num_recurrences', 1),
+        use_checkpoint=config.get('use_checkpoint', False),
+        pad_token_id=1  # Matches tokenizer's <|padding|> token
     ).to(device)
     
     # Load weights
@@ -70,8 +88,8 @@ def sample_from_model(
     print(f"\nModel loaded successfully!")
     print(f"Checkpoint epoch: {checkpoint.get('epoch', 'unknown')}")
     
-    # Encode prompt
-    input_ids = tokenizer.encode(prompt.lower())  # Model was trained on lowercase
+    # Encode prompt (lowercase since model was trained on lowercase data)
+    input_ids = tokenizer.encode(prompt.lower())
     input_ids = torch.tensor([input_ids], dtype=torch.long).to(device)
     
     print(f"\nPrompt: {prompt}")
@@ -95,8 +113,8 @@ def sample_from_model(
 def main():
     parser = argparse.ArgumentParser(description='Sample from trained model')
     parser.add_argument('checkpoint', help='Path to model checkpoint')
-    parser.add_argument('--tokenizer', default='../gutenberg_tokenizer_8192', 
-                        help='Path to tokenizer (default: ../gutenberg_tokenizer_8192)')
+    parser.add_argument('--tokenizer', default='../gutenberg_tokenizer_1024', 
+                        help='Path to tokenizer (default: ../gutenberg_tokenizer_1024)')
     parser.add_argument('--prompt', '-p', default='The quick brown fox', 
                         help='Prompt text')
     parser.add_argument('--max-length', '-m', type=int, default=100,

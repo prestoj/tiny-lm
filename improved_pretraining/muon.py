@@ -173,6 +173,33 @@ def zeropower_via_newtonschulz5(G, steps: int):
         X = X.mT
     return X
 
+# import jax.numpy as jnp
+
+# def orthogonalize(M):
+#    # by @YouJiacheng (with stability loss idea from @leloykun)
+#    # https://twitter.com/YouJiacheng/status/1893704552689303901
+#    # https://gist.github.com/YouJiacheng/393c90cbdc23b09d5688815ba382288b/5bff1f7781cf7d062a155eecd2f13075756482ae
+
+#    abc_list = [
+#       (3955/1024, -8306/1024, 5008/1024),
+#       (3735/1024, -6681/1024, 3463/1024),
+#       (3799/1024, -6499/1024, 3211/1024),
+#       (4019/1024, -6385/1024, 2906/1024),
+#       (2677/1024, -3029/1024, 1162/1024),
+#       (2172/1024, -1833/1024,  682/1024)
+#    ]
+
+#    transpose = M.shape[1] > M.shape[0]
+#    if transpose:
+#       M = M.T
+#    M = M / jnp.linalg.norm(M)
+#    for a, b, c in abc_list:
+#       A = M.T @ M
+#       I = jnp.eye(A.shape[0])
+#       M = M @ (a * I + b * A + c * A @ A)
+#    if transpose:
+#       M = M.T
+#    return M
 
 def muon_update(grad, momentum, beta=0.95, ns_steps=5, nesterov=True):
     momentum.lerp_(grad, 1 - beta)
@@ -378,13 +405,13 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
             if group["use_muon"]:
                 # defaults
                 group["lr"] = group.get("lr", 0.005)
-                group["momentum"] = group.get("momentum", 0.95)
+                group["momentum"] = group.get("momentum", 0.99)
                 group["weight_decay"] = group.get("weight_decay", 0)
                 assert set(group.keys()) == set(["params", "lr", "momentum", "weight_decay", "use_muon"])
             else:
                 # defaults
                 group["lr"] = group.get("lr", 1e-4)
-                group["betas"] = group.get("betas", (0.9, 0.95))
+                group["betas"] = group.get("betas", (0.95, 0.99))
                 group["eps"] = group.get("eps", 1e-10)
                 group["weight_decay"] = group.get("weight_decay", 0)
                 assert set(group.keys()) == set(["params", "lr", "betas", "eps", "weight_decay", "use_muon"])

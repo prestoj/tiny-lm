@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from typing import Optional, Tuple
+from torch.utils.checkpoint import checkpoint
 
 
 class RMSNorm(nn.Module):
@@ -144,11 +145,10 @@ class MultiHeadAttention(nn.Module):
         
         if hasattr(F, 'scaled_dot_product_attention') and self.current_window_size >= seq_len:
             attn_output = F.scaled_dot_product_attention(
-                q, k, v,
+                q * self.scale.sqrt(), k, v,
                 attn_mask=None,
                 dropout_p=0.0,
-                is_causal=True,
-                scale=self.scale
+                is_causal=True
             )
         else:
             scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
@@ -221,21 +221,27 @@ class TinyTransformer(nn.Module):
         n_heads: int = 6,
         n_kv_heads: int = None,
         d_ff: int = 1024,
+        d_token: int = 64,
         max_seq_len: int = 2048,
         pad_token_id: int = 1,
+        num_recurrences: int = 1,
+        use_checkpoint: bool = False,
     ):
         super().__init__()
         
         self.d_model = d_model
         self.pad_token_id = pad_token_id
+        self.num_recurrences = num_recurrences
+        self.use_checkpoint = use_checkpoint
         
-        self.token_embedding = nn.Embedding(vocab_size, d_model // 2)
-        self.token_to_res = nn.Linear(d_model // 2, d_model, bias=False)
+        self.token_embedding = nn.Embedding(vocab_size, d_token)
+        self.token_to_res = nn.Linear(d_token, d_model, bias=False)
         
         self.blocks = nn.ModuleList([
             TransformerBlock(
                 d_model, n_heads, d_ff,
-                is_local=(i % 2 == 0),
+                # is_local=(i % 2 == 0),
+                is_local=False,
                 n_kv_heads=n_kv_heads
             )
             for i in range(n_layers)
@@ -259,10 +265,11 @@ class TinyTransformer(nn.Module):
         self.current_global_window = min(global_window_size, self.max_global_window)
         
         for i, block in enumerate(self.blocks):
-            if i % 2 == 0:  # Local layers
-                block.attention.set_window_size(128)
-            else:  # Global layers
-                block.attention.set_window_size(self.current_global_window)
+            block.attention.set_window_size(self.current_global_window)
+        #     if i % 2 == 0:  # Local layers
+        #         block.attention.set_window_size(128)
+        #     else:  # Global layers
+        #         block.attention.set_window_size(self.current_global_window)
     
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -281,19 +288,27 @@ class TinyTransformer(nn.Module):
             if hasattr(module, 'bias') and module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
     
+    def _apply_block(self, block, x, mask):
+        """Helper function for gradient checkpointing"""
+        return block(x, mask)
+    
     def forward(self, input_ids, labels=None):
         batch_size, seq_len = input_ids.shape
         
         # Create causal mask efficiently
         mask = torch.triu(torch.ones((seq_len, seq_len), dtype=torch.bool, device=input_ids.device), diagonal=1)
         
-        # Embeddings
+        # Embeddings (with RoPE applied via the attention layers)
         x = self.token_embedding(input_ids)
         x = self.token_to_res(x)
         
-        # Apply transformer blocks
-        for block in self.blocks:
-            x = block(x, mask)
+        # Apply transformer blocks with recurrence
+        for _ in range(self.num_recurrences):
+            for block in self.blocks:
+                if self.use_checkpoint and self.training:
+                    x = checkpoint(self._apply_block, block, x, mask, use_reentrant=False)
+                else:
+                    x = block(x, mask)
         
         # Final layer norm and output projection
         x = self.ln_final(x)
@@ -343,26 +358,48 @@ class TinyTransformer(nn.Module):
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Test model with RoPE and GQA
-    print("Testing TinyTransformer with RoPE and GQA:")
+    # Test model with recurrence and checkpointing
+    print("Testing TinyTransformer with recurrence and checkpointing:")
+    
+    # VOCAB_SIZE = 1024
+    # model = TinyTransformer(
+    #     vocab_size=VOCAB_SIZE,
+    #     d_model=264,
+    #     n_layers=1,
+    #     n_heads=4,
+    #     n_kv_heads=4,
+    #     d_token=32,
+    #     d_ff=512,
+    #     num_recurrences=8,
+    #     use_checkpoint=False
+    # ).to(device)
+
+    VOCAB_SIZE = 8192
     model = TinyTransformer(
-        vocab_size=8192,
-        d_model=384,
-        n_layers=12,
-        n_heads=6,
-        n_kv_heads=2,  # GQA: 6 query heads, 2 key-value heads
-        d_ff=1024
+        vocab_size=VOCAB_SIZE,
+        d_model=400,
+        n_layers=1,
+        n_heads=4,
+        n_kv_heads=4,
+        d_token=16,
+        d_ff=768,
+        num_recurrences=8,
+        use_checkpoint=False
     ).to(device)
     
     print(f"Model parameters: {model.num_parameters():,}")
+    print(f"Base layers: {len(model.blocks)}")
+    print(f"Recurrences: {model.num_recurrences}")
+    print(f"Effective depth: {len(model.blocks) * model.num_recurrences} layers")
+    print(f"Gradient checkpointing: {model.use_checkpoint}")
     
     # Test forward pass
     batch_size = 4
     seq_len = 128
-    input_ids = torch.randint(0, 8192, (batch_size, seq_len)).to(device)
+    input_ids = torch.randint(0, VOCAB_SIZE, (batch_size, seq_len)).to(device)
     logits, loss = model(input_ids, labels=input_ids)
     
-    print(f"Input shape: {input_ids.shape}")
+    print(f"\nInput shape: {input_ids.shape}")
     print(f"Output shape: {logits.shape}")
     print(f"Loss: {loss.item() if loss is not None else 'N/A'}")
     

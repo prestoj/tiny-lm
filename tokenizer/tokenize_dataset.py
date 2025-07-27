@@ -116,9 +116,9 @@ def tokenize_text(tokenizer_path: str, text: str) -> List[int]:
 
 if __name__ == "__main__":
     tokenize_dataset(
-        tokenizer_path='gutenberg_tokenizer_8192',
+        tokenizer_path='../gutenberg_tokenizer_1024',
         input_dir='/media/preston/one tiny tb/data/gutenberg/books',
-        output_dir='tokenized_gutenberg_8k_clean',
+        output_dir='../tokenized_gutenberg_1k_clean',
         metadata_path='/media/preston/one tiny tb/data/gutenberg/gutenberg_metadata.csv',
         num_workers=8,
         output_format='numpy'

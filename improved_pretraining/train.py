@@ -23,6 +23,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from model import TinyTransformer
 from dataset import create_dataloaders
 from muon import Muon, SingleDeviceMuonWithAuxAdam
+from tokenizer.tokenizer import load_tokenizer
 
 
 def setup_ddp():
@@ -56,7 +57,7 @@ def get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_training_st
 
 
 def train_epoch(model, train_loader, optimizer, scheduler, scaler, device, epoch, config, 
-                global_step, output_dir, val_loader, rank):
+                global_step, output_dir, val_loader, rank, tokenizer=None):
     """Train for one epoch"""
     model.train()
     total_loss = 0
@@ -141,13 +142,31 @@ def train_epoch(model, train_loader, optimizer, scheduler, scaler, device, epoch
         
         # Log to wandb (only on rank 0)
         if rank == 0 and step % config.log_interval == 0:
-            wandb.log({
+            log_dict = {
                 'train/loss': actual_loss,
                 'train/perplexity': np.exp(actual_loss),
                 'train/learning_rate': current_lr,
                 'train/tokens': total_tokens,
                 'global_step': global_step,
-            })
+            }
+            
+            # Calculate bits per character if tokenizer is available
+            if tokenizer is not None:
+                # Decode the current batch to get character count
+                # Remove padding tokens (pad_token_id is 1)
+                valid_tokens = input_ids[input_ids != 1]
+                if len(valid_tokens) > 0:
+                    text = tokenizer.decode(valid_tokens.cpu().tolist())
+                    num_chars = len(text)
+                    if num_chars > 0:
+                        # Convert loss from nats to bits: bits = nats * log2(e)
+                        # BPC = total bits / total characters
+                        # total bits = loss * num_tokens * log2(e)
+                        total_bits = actual_loss * valid_tokens.numel() * 1.442695
+                        bits_per_char = total_bits / num_chars
+                        log_dict['train/bits_per_char'] = bits_per_char
+            
+            wandb.log(log_dict)
         
         # Increment global step
         global_step += 1
@@ -177,8 +196,11 @@ def main():
     parser.add_argument('--n-layers', type=int, default=12, help='Number of layers')
     parser.add_argument('--n-heads', type=int, default=6, help='Number of attention heads')
     parser.add_argument('--n-kv-heads', type=int, default=None, help='Number of KV heads for GQA (defaults to n_heads)')
+    parser.add_argument('--d-token', type=int, default=64, help='Token dimension')
     parser.add_argument('--d-ff', type=int, default=1536, help='Feed-forward dimension')
     parser.add_argument('--max-seq-len', type=int, default=2048, help='Maximum sequence length')
+    parser.add_argument('--num-recurrences', type=int, default=1, help='Number of times to recycle layers')
+    parser.add_argument('--use-checkpoint', action='store_true', help='Use gradient checkpointing to save memory')
     
     # Training arguments
     parser.add_argument('--data-dir', type=str, required=True, help='Directory with tokenized data')
@@ -206,6 +228,7 @@ def main():
     parser.add_argument('--wandb-run-name', type=str, default=None, help='W&B run name')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--num-workers', type=int, default=4, help='Number of data loading workers')
+    parser.add_argument('--tokenizer-path', type=str, default=None, help='Path to tokenizer for BPC calculation')
     
     args = parser.parse_args()
     
@@ -242,14 +265,20 @@ def main():
         n_layers=args.n_layers,
         n_heads=args.n_heads,
         n_kv_heads=args.n_kv_heads,
+        d_token=args.d_token,
         d_ff=args.d_ff,
         max_seq_len=args.max_seq_len,
-        pad_token_id=0
+        pad_token_id=1,  # Matches tokenizer's <|padding|> token
+        num_recurrences=args.num_recurrences,
+        use_checkpoint=args.use_checkpoint
     ).to(device)
     
     # Print model param count (only on rank 0)
     if rank == 0:
         print(f"Model parameters: {model.num_parameters():,}")
+        print(f"Base layers: {args.n_layers}, Recurrences: {args.num_recurrences}")
+        print(f"Effective depth: {args.n_layers * args.num_recurrences} layers")
+        print(f"Gradient checkpointing: {args.use_checkpoint}")
         print(f"Using DDP with {world_size} GPUs")
     
     # Wrap model with DDP
@@ -304,6 +333,13 @@ def main():
     # Mixed precision scaler
     scaler = GradScaler('cuda')
     
+    # Load tokenizer if path provided (for BPC calculation)
+    tokenizer = None
+    if args.tokenizer_path:
+        if rank == 0:
+            print(f"Loading tokenizer from {args.tokenizer_path} for BPC calculation...")
+        tokenizer = load_tokenizer(args.tokenizer_path)
+    
     # Log model to wandb (only on rank 0)
     if rank == 0:
         wandb.watch(model, log_freq=100)
@@ -324,7 +360,7 @@ def main():
         # Train
         train_loss, global_step = train_epoch(
             model, train_loader, optimizer, scheduler, scaler,
-            device, epoch, config, global_step, output_dir, val_loader, rank
+            device, epoch, config, global_step, output_dir, val_loader, rank, tokenizer
         )
     
     if rank == 0:
